@@ -2,12 +2,14 @@ import pandas as pd
 import pymilvus
 import streamlit as st
 
-
+#st.set_page_config(layout="wide")
 @st.cache_data
 def load_data():
-    orig_data=pd.read_csv('DatasetEnglish.csv')
-    sentiment_data=pd.read_csv('sentiment_data.csv')
-    data_extra = pd.merge(orig_data, sentiment_data, how='left', on='talk_id')
+#    orig_data=pd.read_csv('DatasetEnglish.csv')
+#    sentiment_data=pd.read_csv('sentiment_data.csv')
+#    data_extra = pd.merge(orig_data, sentiment_data, how='left', on='talk_id')
+#    data_extra=data_extra.drop('transcript', axis=1)
+    data_extra=pd.read_csv('data_extra.csv')
     return data_extra
 
 data_extra = load_data()
@@ -15,7 +17,8 @@ data_extra = load_data()
 @st.cache_resource
 def load_zilliz():
     pymilvus.connections.connect(uri=st.secrets["zilliz_uri"],
-    token=st.secrets["zilliz_token"])
+    token=st.secrets["zilliz_token"]
+    )
     collection = pymilvus.Collection("CosineSimilarity")
     return collection
 
@@ -98,27 +101,38 @@ else:
 
     top_5_sent, top_5_cosine = get_results(selected_talk)
 
-    container = st.container() # create a container
-    with container: # use the container
+    
+    container = st.container()
+    output_sent = "" # initialize the variable
+    output_cosine = "" # initialize the variable
+    with container:
         col1, col2 = st.columns(2) # create two columns
         with col1: # use the first column
+            # add both buttons in the first column
             if st.button("Get top 5 related talks by sentiment"): # add a button
                 try:
                     top_5_sent = get_top_5_sentiment(selected_talk)
-                    st.write("Top 5 related talks based on sentiment score:")
+                    # store the output in a variable
+                    output_sent = ""
+                    output_sent += "Top 5 related talks based on sentiment score:\n"
                     for i in range(5):
                         related_talk = top_5_sent["talk_title"].iloc[i]
                         related_name = top_5_sent["speakers_name"].iloc[i]
                         url = top_5_sent["shortened_url"].iloc[i]
-                        st.write(f"{i+1}. {related_talk} by {related_name} URL: {url}")
+                        output_sent += f"{i+1}. {related_talk} by {related_name} URL: {url}\n"
                 except IndexError:
-                    st.write("Sorry, there are no related talks by sentiment for this talk.")
-        with col2: # use the first column
+                    output_sent = "Sorry, there are no related talks by sentiment for this talk."
             if st.button("Get top 5 related talks by cosine similarity"): # add another button
                 top_5_cosine = get_top_5_cosine(selected_talk)
-                st.write("Top 5 related talks based on cosine similarity:")
+                # store the output in a variable
+                output_cosine = ""
+                output_cosine += "Top 5 related talks based on cosine similarity:\n"
                 for i in range(5):
                     related_talk = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["talk_title"].values[0]
                     related_name = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["speakers_name"].values[0]
                     url = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["shortened_url"].values[0]
-                    st.write(f"{i+1}. {related_talk} by {related_name} URL: {url}")
+                    output_cosine += f"{i+1}. {related_talk} by {related_name} URL: {url}\n"
+        with col2: # use the second column
+            # display both outputs in the second column
+            st.write(output_sent)
+            st.write(output_cosine)
