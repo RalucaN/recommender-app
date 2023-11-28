@@ -1,28 +1,31 @@
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import pymilvus
 import streamlit as st
 
 
-orig_data=pd.read_csv('DatasetEnglish.csv')
-sentiment_data=pd.read_csv('sentiment_data.csv')
-data_extra = pd.merge(orig_data, sentiment_data, how='left', on='talk_id')
+@st.cache_data
+def load_data():
+    orig_data=pd.read_csv('DatasetEnglish.csv')
+    sentiment_data=pd.read_csv('sentiment_data.csv')
+    data_extra = pd.merge(orig_data, sentiment_data, how='left', on='talk_id')
+    return data_extra
 
-def get_similarity():
-    tfidf = TfidfVectorizer(stop_words='english')
-    data_extra['combined_features'] = data_extra['talk_slug'] + ' ' + data_extra['talk_description'] + ' ' + data_extra['speakers_name'] + ' ' +data_extra['topic_0_name'] + ' ' + data_extra['transcript']
-    data_extra['combined_features'] = data_extra['combined_features'].fillna('')
-    tfidf_matrix = tfidf.fit_transform(data_extra['combined_features'])
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    return cosine_sim
+data_extra = load_data()
 
-if "cosine_sim" not in st.session_state:
-    st.session_state.cosine_sim = get_similarity()
-cosine_sim = st.session_state.cosine_sim
+@st.cache_resource
+def load_zilliz():
+    pymilvus.connections.connect(uri=st.secrets["zilliz_uri"],
+    token=st.secrets["zilliz_token"])
+    collection = pymilvus.Collection("CosineSimilarity")
+    return collection
+
+collection = load_zilliz()
 
 st.title("TED Talks Recommender")
 
-selected_topics = st.multiselect("Filter by topic", data_extra['topic_0_name'])
+unique_topics = (data_extra['topic_0_name'].drop_duplicates()).sort_values()
+
+selected_topics = st.multiselect("Filter by topic", unique_topics)
 
 df = data_extra[data_extra["topic_0_name"].isin(selected_topics)]
 
@@ -43,27 +46,79 @@ else:
         top_sent = filtered_df[filtered_df["talk_title"] != selected_talk].head(5)
         return top_sent
 
-    if st.button("Get top 5 related talks by sentiment"):
-        top_5_sent = get_top_5_sentiment(selected_talk)
-        st.write("Top 5 related talks based on sentiment score:")
-        st.dataframe(top_5_sent[["talk_title", "speakers_name", "shortened_url"]])
-
-    @st.cache_data
+    @st.cache_data 
     def get_top_5_cosine(selected_talk):
-        talk_index = df[df["talk_title"] == selected_talk].index.values[0]
-        similar_talks = list(enumerate(cosine_sim[talk_index]))
-        similar_talks = sorted(similar_talks, key=lambda x: x[1], reverse=True)
-        cosine_5 = similar_talks[1:6]
-        return cosine_5
+        talk_id = df[df["talk_title"] == selected_talk]["talk_id"].values[0]
 
-    if st.button("Get top 5 related talks by cosine similarity"):
-        top_5_cosine = get_top_5_cosine(selected_talk)
-        st.write("Top 5 related talks based on cosine similarity:")
-        for i in range(5):
-            related_talk = data_extra[data_extra.index ==top_5_cosine[i][0]]['talk_slug'].values[0]
-            related_name = data_extra[data_extra['talk_slug'] == related_talk]['talk_title'].values[0]
-            related_speaker = data_extra[data_extra['talk_slug'] == related_talk]['speakers_name'].values[0]
-            url = data_extra[data_extra['talk_slug'] == related_talk]['shortened_url'].values[0]
-            related_score = top_5_cosine[i][1]
-            st.write(f"{i+1}. {related_name} by {related_speaker} URL: {url} (Cosine similarity: {related_score:.2f})")
+        query_expr = f"talk_id == {talk_id}"
 
+        results = collection.query(
+            expr=query_expr,
+            output_fields=["talk_id", "vector"]
+        )
+
+        query_vector = results[0]['vector']
+
+        search_params = {
+            "index_type": "AUTOINDEX",
+            "metric_type": "COSINE",
+            "params": {}
+        }
+
+        results = collection.search(
+            data=[query_vector],
+            anns_field="vector",
+            param=search_params,
+            limit=6,
+            output_fields=["talk_id"]
+        )
+
+        result_talk_ids = [result.entity.talk_id for result in results[0][1:]]
+
+        return result_talk_ids
+
+    @st.cache_resource 
+    def get_query_vector(selected_talk):
+        talk_id = df[df["talk_title"] == selected_talk]["talk_id"].values[0]
+
+        query_expr = f"talk_id == {talk_id}"
+
+        results = collection.query(
+            expr=query_expr,
+            output_fields=["talk_id", "vector"]
+        )
+
+        query_vector = results[0]['vector']
+        return query_vector
+
+    query_vector = get_query_vector(selected_talk)
+
+    def get_results(selected_talk):
+        return get_top_5_sentiment(selected_talk), get_top_5_cosine(selected_talk)
+
+    top_5_sent, top_5_cosine = get_results(selected_talk)
+
+    container = st.container() # create a container
+    with container: # use the container
+        col1, col2 = st.columns(2) # create two columns
+        with col1: # use the first column
+            if st.button("Get top 5 related talks by sentiment"): # add a button
+                try:
+                    top_5_sent = get_top_5_sentiment(selected_talk)
+                    st.write("Top 5 related talks based on sentiment score:")
+                    for i in range(5):
+                        related_talk = top_5_sent["talk_title"].iloc[i]
+                        related_name = top_5_sent["speakers_name"].iloc[i]
+                        url = top_5_sent["shortened_url"].iloc[i]
+                        st.write(f"{i+1}. {related_talk} by {related_name} URL: {url}")
+                except IndexError:
+                    st.write("Sorry, there are no related talks by sentiment for this talk.")
+        with col2: # use the first column
+            if st.button("Get top 5 related talks by cosine similarity"): # add another button
+                top_5_cosine = get_top_5_cosine(selected_talk)
+                st.write("Top 5 related talks based on cosine similarity:")
+                for i in range(5):
+                    related_talk = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["talk_title"].values[0]
+                    related_name = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["speakers_name"].values[0]
+                    url = data_extra[data_extra["talk_id"] == top_5_cosine[i]]["shortened_url"].values[0]
+                    st.write(f"{i+1}. {related_talk} by {related_name} URL: {url}")
